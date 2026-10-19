@@ -66,6 +66,22 @@ class TestParseDate:
     def test_short_slash(self):
         assert parse_date("5/3/2025") == datetime(2025, 3, 5)
 
+    # Фикс #1: невалидная дата не должна ронять скрипт
+    def test_invalid_day_returns_none(self):
+        assert parse_date("30.02.2026") is None  # 30 февраля
+        assert parse_date("31/04/2025") is None  # 31 апреля
+        assert parse_date("2026-13-01") is None  # 13-й месяц
+
+    # Фикс #5: отбрасывание времени после даты
+    def test_date_with_time_iso(self):
+        assert parse_date("2026-03-03 12:34") == datetime(2026, 3, 3)
+
+    def test_date_with_time_dot(self):
+        assert parse_date("09.01.2026 15:00") == datetime(2026, 1, 9)
+
+    def test_date_with_time_slash(self):
+        assert parse_date("31/10/2025 09:30") == datetime(2025, 10, 31)
+
 
 # ---------------------------------------------------------------------------
 # normalize_order_num
@@ -181,6 +197,19 @@ class TestParsePriceChat:
     def test_dot_thousands_in_chat(self):
         assert parse_price_chat("2.094.000 руб") == 2_094_000.0
 
+    # Фикс #10: дополнительные единицы — RUR, RUB, р., т.р., рублей (слитно с числом)
+    def test_rub_uppercase(self):
+        assert parse_price_chat("234000 RUB") == 234_000.0
+
+    def test_rur(self):
+        assert parse_price_chat("150000 RUR") == 150_000.0
+
+    def test_tr_abbr(self):
+        assert parse_price_chat("234 т.р.") == 234_000.0
+
+    def test_rublej_fullword(self):
+        assert parse_price_chat("234000 рублей") == 234_000.0
+
 
 # ---------------------------------------------------------------------------
 # calc_discounted_unit_price
@@ -256,6 +285,16 @@ class TestExtractOrderFromPayment:
     def test_match_after_space(self):
         assert extract_order_from_payment("Перевод от Петрова A528", self.ORDERS) == 528
 
+    # Фикс #6: голое «№<число>» и «No<число>» без слова «счёт»/«заказ»
+    def test_bare_hash(self):
+        assert extract_order_from_payment("Платёж №775", self.ORDERS) == 775
+
+    def test_bare_no(self):
+        assert extract_order_from_payment("Оплата по No 528", self.ORDERS) == 528
+
+    def test_bare_sharp(self):
+        assert extract_order_from_payment("Платёж #243", self.ORDERS) == 243
+
 
 # ---------------------------------------------------------------------------
 # is_invite
@@ -286,6 +325,13 @@ class TestIsInvite:
 
     def test_bronir(self):
         assert is_invite("Забронируйте примерку на удобное время") is True
+
+    # Фикс #7: «приходит» (3-е лицо, о товаре) НЕ должно считаться приглашением
+    def test_prikhodit_tovar_not_invite(self):
+        assert is_invite("Шуба приходит из ателье через 10 дней") is False
+
+    def test_prikhoditsya_not_invite(self):
+        assert is_invite("Приходится ждать около недели") is False
 
 
 # ---------------------------------------------------------------------------

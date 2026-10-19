@@ -118,37 +118,68 @@ _RU_MONTHS = {
 }
 
 
+def _safe_date(year, month, day):
+    """Создаёт datetime; при недопустимых значениях возвращает None (не падает)."""
+    try:
+        return datetime(year, month, day)
+    except (ValueError, OverflowError):
+        return None
+
+
 def parse_date(s):
     """
     Парсит строку с датой в datetime. При неудаче возвращает None.
     Форматы: ISO, D[D].M[M].YYYY, D[D]/M[M]/YYYY, Excel-serial (4-6 цифр), «23 сен 2026».
+    Если строка содержит время («2026-03-03 12:34»), оно отбрасывается — берётся только дата.
+    Невалидные даты («30.02.2026») логируются как warn, но не роняют скрипт.
     """
     if not s:
         return None
     s = s.strip()
-    # ISO: 2026-03-03
-    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
-    if m:
-        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    # DD.MM.YYYY или D.M.YYYY: 09.01.2026 / 9.1.2026
-    m = re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", s)
-    if m:
-        return datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-    # DD/MM/YYYY или D/M/YYYY (подтверждено данными: 138 строк с днём >12)
-    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", s)
-    if m:
-        return datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-    # Excel serial: 4-6 цифр (1927-2170 годы) → база 1899-12-30 + дней
-    m = re.match(r"^\d{4,6}$", s)
-    if m:
-        return datetime(1899, 12, 30) + timedelta(days=int(s))
-    # Русский текст: «23 сен 2026» или «23 сентября 2026»
+    # Отбрасываем всё после первого пробела (на случай «2026-03-03 12:34» или «09.01.2026 15:00»)
+    # Исключение — русские «23 сен 2026», где пробелы часть формата: пробуем сначала с ними.
+    def _try_all(txt):
+        # ISO: 2026-03-03
+        m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", txt)
+        if m:
+            return _safe_date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        # DD.MM.YYYY или D.M.YYYY: 09.01.2026 / 9.1.2026
+        m = re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", txt)
+        if m:
+            return _safe_date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        # DD/MM/YYYY или D/M/YYYY (подтверждено данными: 138 строк с днём >12)
+        m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", txt)
+        if m:
+            return _safe_date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        # Excel serial: 4-6 цифр (1927-2170 годы) → база 1899-12-30 + дней
+        m = re.match(r"^\d{4,6}$", txt)
+        if m:
+            try:
+                return datetime(1899, 12, 30) + timedelta(days=int(txt))
+            except (ValueError, OverflowError):
+                return None
+        return None
+
+    # Пробуем сначала «русский текст» (с пробелами в формате)
     m = re.match(r"^(\d{1,2})\s+([а-яё]+)\.?\s+(\d{4})$", s, re.IGNORECASE)
     if m:
         day, mon_str, year = int(m.group(1)), m.group(2).lower()[:3], int(m.group(3))
         month = _RU_MONTHS.get(mon_str)
         if month:
-            return datetime(year, month, day)
+            d = _safe_date(year, month, day)
+            if d:
+                return d
+
+    # Остальные форматы — пробуем сперва всю строку, затем «только дату» (без времени)
+    result = _try_all(s)
+    if result:
+        return result
+    date_part = s.split()[0] if s.split() else s
+    if date_part != s:
+        result = _try_all(date_part)
+        if result:
+            return result
+
     _warn["даты_не_разобраны"] += 1
     print(f"[parse_date] не удалось разобрать: {s!r}", file=sys.stderr)
     return None
@@ -253,7 +284,7 @@ def parse_price_chat(s):
     # Числовые паттерны с единицей измерения
     pattern = re.compile(
         r"([\d][\d\s]*(?:[,\.][\d]+)*(?:\.\d{3})*)"
-        r"\s*(₽|руб\.?|тыс\.?|к\b|млн\.?)",
+        r"\s*(₽|руб\.?|рублей|рубля|рубль|тыс\.?|т\.р\.?|тр\b|к\b|млн\.?|rub|rur|р\.|p\.)",
         re.IGNORECASE,
     )
     m = pattern.search(text)
@@ -278,7 +309,11 @@ def parse_price_chat(s):
     except ValueError:
         return None
 
-    multipliers = {"тыс": 1_000, "к": 1_000, "млн": 1_000_000, "₽": 1, "руб": 1}
+    multipliers = {
+        "тыс": 1_000, "т.р": 1_000, "тр": 1_000, "к": 1_000,
+        "млн": 1_000_000,
+        "₽": 1, "руб": 1, "рубл": 1, "rub": 1, "rur": 1, "р.": 1, "p.": 1,
+    }
     for key, mult in multipliers.items():
         if unit.startswith(key):
             return value * mult
@@ -379,6 +414,8 @@ def extract_order_from_payment(text, known_orders):
         text,
         re.IGNORECASE,
     )
+    # Голое «№<число>» или «No<число>» (без слова «счёт»/«заказ» перед ним)
+    candidates += re.findall(r"(?:№|#|\bno\.?\s*)0*(\d+)", text, re.IGNORECASE)
     for c in candidates:
         num = int(c)
         if num in known_orders:
@@ -404,7 +441,7 @@ def is_invite(text):
         r"подъехать",
         r"приезжайт",
         r"приглаш",
-        r"приход\w*",                    # приходите, приходи
+        r"приход(?:ите|и)\b",            # «приходите/приходи» — только императив, не «приходит»
         r"прийти",
         r"жд[её]м\s+вас",                # «ждём вас»
         r"бронир\w*\s+(?:визит|примерк)",# «забронируйте визит/примерку»
@@ -473,13 +510,29 @@ def solve_q1(clean_rows):
 # Q2 — сверка с банком
 # ---------------------------------------------------------------------------
 
+def _is_rub(currency_str):
+    """Проверяет, что строка-валюта обозначает рубли (₽, RUB, руб)."""
+    if currency_str is None:
+        return True  # отсутствует колонка валюты — считаем ₽
+    c = currency_str.strip().upper().rstrip(".")
+    return c in ("", "₽", "RUB", "RUR", "РУБ", "РУБЛЬ", "РУБЛИ", "РУБЛЕЙ")
+
+
 def solve_q2(clean_rows, bank_rows):
     known_orders = set(r["_order_num"] for r in clean_rows)
     paid_orders = set(r["_order_num"] for r in clean_rows if r["_status"] == "Оплачен")
 
-    # Только поступления (возвраты — Списания, не считаются)
-    incoming = [r for r in bank_rows if r["Тип"].strip() == "Поступление"]
-    print(f"[Q2] поступлений: {len(incoming)} из {len(bank_rows)} строк выписки", file=sys.stderr)
+    # Только поступления в рублях (возвраты — Списания; валюты ≠ ₽ не учитываем)
+    incoming = []
+    for r in bank_rows:
+        if r["Тип"].strip() != "Поступление":
+            continue
+        if not _is_rub(r.get("Валюта")):
+            _warn["банк_не_рубли"] += 1
+            print(f"[Q2] не-рублёвое поступление: {r.get('Валюта')!r} — пропускаем", file=sys.stderr)
+            continue
+        incoming.append(r)
+    print(f"[Q2] поступлений в ₽: {len(incoming)} из {len(bank_rows)} строк выписки", file=sys.stderr)
 
     payment_orders = set()
     unidentified = []
@@ -494,15 +547,21 @@ def solve_q2(clean_rows, bank_rows):
     # (a) Оплаченные заказы без поступлений в выписке
     paid_without_payment = sorted(paid_orders - payment_orders)
 
-    # (b) Неопознанные поступления
+    # (b) Неопознанные поступления — используем общий парсер цен (а не упрощённую replace-логику),
+    # чтобы корректно обработать форматы "1,000,000.00", "145 000,50" и прочие.
     unidentified_sum = 0.0
     for row in unidentified:
-        amt_str = row["Сумма"].strip().replace(" ", "").replace(",", ".")
-        try:
-            unidentified_sum += float(amt_str)
-        except ValueError:
+        amt = parse_price_crm(row["Сумма"])
+        if amt is None:
             _warn["суммы_банк_не_разобраны"] += 1
             print(f"[Q2] не удалось разобрать сумму: {row['Сумма']!r}", file=sys.stderr)
+            continue
+        if amt < 0:
+            # Поступление с отрицательной суммой — скорее всего ошибка данных; логируем
+            _warn["суммы_банк_отрицательные"] += 1
+            print(f"[Q2] отрицательное поступление: {row['Сумма']!r} — пропускаем", file=sys.stderr)
+            continue
+        unidentified_sum += amt
 
     print(
         f"[Q2] оплачен без поступления: {len(paid_without_payment)}, "
@@ -529,6 +588,12 @@ def solve_q3(clean_rows, prices, renames, mgr_map):
         if row["_status"] == "Отменён":
             continue
 
+        # Валюта: сравнение с минимальной ценой в прайсе осмысленно только для ₽
+        if not _is_rub(row.get("Валюта")):
+            _warn["crm_не_рубли"] += 1
+            print(f"[Q3] не-рублёвая строка: {row.get('Валюта')!r} — пропускаем", file=sys.stderr)
+            continue
+
         art_raw = row["Артикул"].strip()
         # Резолвим старый артикул → новый через таблицу переименований
         art = renames.get(art_raw, art_raw)
@@ -541,10 +606,16 @@ def solve_q3(clean_rows, prices, renames, mgr_map):
         if price_raw is None:
             continue
 
+        qty_raw = row["Кол-во"].strip()
         try:
-            qty = int(row["Кол-во"].strip())
+            qty = int(qty_raw)
         except ValueError:
-            qty = 1
+            try:
+                qty = int(float(qty_raw.replace(",", ".")))
+            except ValueError:
+                _warn["qty_не_разобрано"] += 1
+                print(f"[Q3] не удалось разобрать qty: {qty_raw!r} — считаем 1", file=sys.stderr)
+                qty = 1
 
         discounted = calc_discounted_unit_price(price_raw, qty, row["Скидка"])
 
@@ -577,9 +648,13 @@ def solve_q3(clean_rows, prices, renames, mgr_map):
             file=sys.stderr,
         )
 
+    # Детерминированный порядок: сортировка по убыванию числа нарушений, затем по имени
+    sorted_by_manager = dict(
+        sorted(violations_by_manager.items(), key=lambda kv: (-kv[1], kv[0]))
+    )
     return {
         "q3_price_violation_lines_total": violations_total,
-        "q3_price_violation_lines_by_manager": dict(violations_by_manager),
+        "q3_price_violation_lines_by_manager": sorted_by_manager,
     }
 
 
@@ -677,13 +752,17 @@ def solve_q4(zip_path):
 def print_warn_summary(result):
     """Выводит в stderr итоговую сводку красных флагов после расчёта всех вопросов."""
     labels = {
-        "даты_не_разобраны":      "Дат не разобрано         ",
-        "цены_crm_не_разобраны":  "Цен CRM не разобрано     ",
-        "суммы_банк_не_разобраны":"Сумм банка не разобрано  ",
-        "скидки_не_разобраны":    "Скидок не разобрано      ",
-        "менеджеры_не_опознаны":  "Менеджеров не опознано   ",
-        "Q3_строк_без_прайса":    "Строк Q3 без прайса      ",
-        "qty_ноль_или_отриц":     "Строк с qty≤0            ",
+        "даты_не_разобраны":       "Дат не разобрано         ",
+        "цены_crm_не_разобраны":   "Цен CRM не разобрано     ",
+        "суммы_банк_не_разобраны": "Сумм банка не разобрано  ",
+        "суммы_банк_отрицательные":"Отриц. поступлений       ",
+        "скидки_не_разобраны":     "Скидок не разобрано      ",
+        "менеджеры_не_опознаны":   "Менеджеров не опознано   ",
+        "Q3_строк_без_прайса":     "Строк Q3 без прайса      ",
+        "qty_ноль_или_отриц":      "Строк с qty≤0            ",
+        "qty_не_разобрано":        "qty не разобрано         ",
+        "crm_не_рубли":            "CRM строк не в ₽         ",
+        "банк_не_рубли":           "Банк строк не в ₽        ",
     }
     total = sum(_warn.values())
     sep = "─" * 44
@@ -710,24 +789,32 @@ def print_warn_summary(result):
 # ---------------------------------------------------------------------------
 
 def build_notes():
+    """Текст принятых правил расчёта — без привязки к конкретным числам из учебного набора,
+    чтобы на новой версии данных notes оставались корректными."""
     return (
-        "Принятые решения: "
-        "(1) Даты DD/MM/YYYY (подтверждено данными: 138 строк с днём >12). "
-        "(2) Excel serial: база 1899-12-30 + дней. "
-        "(3) Дубли (заказ, строка): берём строку с самым поздним Выгружено; "
-        "26 пар с равным Выгружено — полные дубли, берём первую. "
-        "(4) Статусы: PAID/оплачено - Оплачен, отменен/CANCELLED - Отменён, "
-        "REFUND/возврат - Возврат, остальное - В работе. "
-        "(5) Скидка N%: от суммы строки (цена*кол-во); число без % - рублей на строку. "
-        "(6) Счёт No = номер заказа (173/173 совпали с CRM). "
-        "(7) Возвраты в выписке - Списания, не считаются Поступлениями. "
-        "(8) Артикулы в Прайс_история - только под НОВЫМ именем; "
-        "старый артикул резолвится через Переименования. "
-        "(9) Строка Q3 без записи в прайсе - пропускается (в данных таких нет). "
-        "(10) Q4: 'шьём в нашем ателье' и 'шоурум находится у метро' - "
-        "не приглашения. Дубли в выписке: 0. "
-        "(11) Q2b: 4 из 16 неопознанных платежей содержат номера заказов (A-01169, "
-        "A-01180, A-01191, A-01202), которых нет в CRM - по правилу считаются неопознанными."
+        "Принятые правила расчёта: "
+        "(1) Даты в формате DD/MM/YYYY (не MM/DD) — определено по дням >12 в поле. "
+        "(2) Excel-serial даты: база 1899-12-30 + дней. "
+        "(3) Дубли (номер заказа, № строки) схлопываются по полю «Выгружено»: "
+        "оставляем строку с самым поздним timestamp; при равном Выгружено берём первую "
+        "(в тестовых данных такие строки — полные дубли). "
+        "(4) Нормализация статусов: PAID/Оплачен/оплачено → Оплачен; "
+        "Отменён/отменен/CANCELLED → Отменён; REFUND/Возврат → Возврат; остальное → В работе. "
+        "(5) Скидка «N%» — процент от (цена × кол-во); число без % — фиксированная сумма "
+        "в рублях на строку, делится на qty для получения скидки на единицу. "
+        "(6) Привязка платежа к заказу: по номеру заказа в назначении (A-NNN / заказ NNN / "
+        "зак. NNN / счёт №NNN / №NNN); «Счёт №» трактуется как номер заказа. "
+        "(7) Поступления = Тип «Поступление» в ₽; возвраты (Тип «Списание») и не-рублёвые "
+        "строки не учитываются. "
+        "(8) Артикулы в Прайс_история хранятся под НОВЫМ именем — старый резолвится через "
+        "лист «Переименования» перед поиском цены. "
+        "(9) Q3: строка без подходящей записи в прайсе на дату создания — пропускается "
+        "(логируется в stderr). "
+        "(10) Q4: детектор приглашений не считает приглашением фразы о работе ателье "
+        "(«шьём в нашем ателье») и адресе шоурума («находится у метро/по адресу»). "
+        "(11) Q2b: платёж с номером, которого нет в CRM, считается неопознанным "
+        "(по правилу: без привязки к существующему заказу). "
+        "(12) Валюта ≠ ₽ в CRM/банке — строка пропускается с warn в stderr."
     )
 
 
