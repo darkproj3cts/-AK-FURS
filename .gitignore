@@ -7,9 +7,6 @@ data/
 answers_template.json
 ТЗ — тестовое задание AI-ассистент AK Furs.docx
 
-# Debug output
-debug_q4.txt
-
 # Python
 __pycache__/
 *.py[cod]
