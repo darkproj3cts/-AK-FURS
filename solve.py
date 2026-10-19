@@ -30,12 +30,17 @@ def load_crm(path):
 
 
 def load_bank(path):
-    """Загружает банковскую выписку (Поступления + Списания). Пропускает строку-заголовок счёта."""
+    """Загружает банковскую выписку (Поступления + Списания).
+    Если первая строка — «Выписка по счёту…», пропускает её; иначе трактует как заголовок."""
     rows = []
     with open(path, encoding="cp1251") as f:
         reader = csv.reader(f, delimiter=";")
-        next(reader)  # пропустить «Выписка по счёту...»
-        header = next(reader)
+        first = next(reader)
+        # Первая ячейка — «Выписка по счёту ...» (прочие поля пустые) ⇒ титульная строка
+        if first and first[0].strip().lower().startswith("выписка"):
+            header = next(reader)
+        else:
+            header = first
         for row in reader:
             if len(row) >= len(header):
                 rows.append(dict(zip(header, row)))
@@ -82,8 +87,10 @@ def load_renames(wb):
 
 def load_prices(wb):
     """
-    Строит словарь: новый_артикул -> список (дата_с, дата_по, мин_цена).
-    дата_по = None означает «действует по сей день» (открытый правый край).
+    Строит словарь: новый_артикул -> список (дата_с, дата_по, мин_цена),
+    отсортированный по дата_с (от старых к новым). Это защищает Q3 от
+    случайного порядка строк в xlsx при перекрытии периодов.
+    дата_по = None означает «действует по сей день».
     В Прайс_история артикулы хранятся только под НОВЫМ именем.
     """
     ws = wb["Прайс_история"]
@@ -92,8 +99,10 @@ def load_prices(wb):
         art, d_from, d_to, _, min_p = row[0], row[1], row[2], row[3], row[4]
         if art and d_from is not None and min_p is not None:
             prices[art].append((d_from, d_to, float(min_p)))
-    print(f"[Прайс] загружено {len(prices)} артикулов", file=sys.stderr)
-    return dict(prices)
+    # Сортировка периодов по дате начала — критично при перекрывающихся диапазонах
+    result = {art: sorted(periods, key=lambda t: t[0]) for art, periods in prices.items()}
+    print(f"[Прайс] загружено {len(result)} артикулов", file=sys.stderr)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +118,7 @@ _RU_MONTHS = {
 def parse_date(s):
     """
     Парсит строку с датой в datetime. При неудаче возвращает None.
-    Форматы: ISO, DD.MM.YYYY, DD/MM/YYYY, Excel-serial (5 цифр), «23 сен 2026».
+    Форматы: ISO, D[D].M[M].YYYY, D[D]/M[M]/YYYY, Excel-serial (4-6 цифр), «23 сен 2026».
     """
     if not s:
         return None
@@ -118,16 +127,16 @@ def parse_date(s):
     m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
     if m:
         return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    # DD.MM.YYYY: 09.01.2026
-    m = re.match(r"^(\d{2})\.(\d{2})\.(\d{4})$", s)
+    # DD.MM.YYYY или D.M.YYYY: 09.01.2026 / 9.1.2026
+    m = re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", s)
     if m:
         return datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-    # DD/MM/YYYY: 31/10/2025 (подтверждено данными: 138 строк с днём >12)
-    m = re.match(r"^(\d{2})/(\d{2})/(\d{4})$", s)
+    # DD/MM/YYYY или D/M/YYYY (подтверждено данными: 138 строк с днём >12)
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", s)
     if m:
         return datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-    # Excel serial: 45752 → база 1899-12-30 + дней
-    m = re.match(r"^\d{5}$", s)
+    # Excel serial: 4-6 цифр (1927-2170 годы) → база 1899-12-30 + дней
+    m = re.match(r"^\d{4,6}$", s)
     if m:
         return datetime(1899, 12, 30) + timedelta(days=int(s))
     # Русский текст: «23 сен 2026» или «23 сентября 2026»
@@ -177,7 +186,8 @@ def parse_price_crm(s):
     """
     Парсит строку с ценой из CRM в рубли (float).
     Поддерживает: '50 000', '17,000.00', '245,000.00', '2 200 000',
-                  '140000,00', '2,48 млн', '500000,00', '32,000.00'.
+                  '140000,00', '2,48 млн', '500000,00', '32,000.00',
+                  '25,000' (US-формат, запятая = тысячи).
     """
     if not s:
         return None
@@ -193,14 +203,24 @@ def parse_price_crm(s):
     # Если есть и запятая и точка — запятая = разделитель тысяч, точка = десятичный
     if "," in s and "." in s:
         s = s.replace(",", "")
+    elif s.count(",") >= 1 and "." not in s:
+        # Только запятые: если ВСЕ фрагменты после запятых по 3 цифры — это тысячи,
+        # иначе одна запятая = десятичный разделитель (русский формат).
+        comma_parts = s.split(",")
+        if len(comma_parts) > 2 and all(len(p) == 3 for p in comma_parts[1:]):
+            # '1,234,567' — тысячи
+            s = s.replace(",", "")
+        elif len(comma_parts) == 2 and len(comma_parts[1]) == 3:
+            # '25,000' — тысячи (эвристика: 3 цифры после единственной запятой)
+            s = s.replace(",", "")
+        else:
+            # '140000,00' — десятичный разделитель
+            s = s.replace(",", ".")
 
     # Точки как разделители тысяч: 2.094.000 или 385.000
-    # Правило: если все части после первой точки ровно по 3 цифры — это тысячи
     parts = s.split(".")
     if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
         s = s.replace(".", "")
-    else:
-        s = s.replace(",", ".")
 
     try:
         return float(s)
@@ -309,8 +329,12 @@ def calc_discounted_unit_price(price_per_unit, qty, discount_str):
     «N%» — процент от суммы строки (цена × кол-во), результат на единицу.
     Число без «%» — фиксированная сумма в рублях на всю строку.
     Возвращает цену за единицу после скидки.
+    При qty <= 0 возвращает исходную цену (защита от деления на ноль).
     """
     if not discount_str or not discount_str.strip():
+        return price_per_unit
+    if qty <= 0:
+        print(f"[скидка] qty={qty} — пропускаем расчёт скидки", file=sys.stderr)
         return price_per_unit
     d = discount_str.strip()
     if d.endswith("%"):
@@ -332,10 +356,12 @@ def extract_order_from_payment(text, known_orders):
     Возвращает int, если номер найден среди известных заказов, иначе None.
     Поддерживает: 'A877', 'заказ 775', 'зак. 528', 'A-00243',
                   'по счету №828', 'Счёт № 00991', 'А-00391' (кириллическая А).
+    Префикс A/А должен быть на границе слова, чтобы не ловить случайные
+    совпадения внутри слов (например, «Автор», «iPhone»).
     """
-    # Паттерн с префиксом A/А (латиница или кириллица) и необязательным дефисом
+    # Паттерн: A/А на границе слова + необязательный дефис + необязательные нули + цифры
     candidates = re.findall(
-        r"[AАaа]-?0*(\d+)",
+        r"(?:^|[\s,.;:()№#])[AАaа]-?0*(\d+)",
         text,
         re.IGNORECASE,
     )
@@ -355,22 +381,28 @@ def extract_order_from_payment(text, known_orders):
 def is_invite(text):
     """
     Возвращает True, если сообщение менеджера — приглашение на встречу или примерку.
-    Исключает информационные фразы: «шьём в нашем ателье», «шоурум находится у метро».
+    Исключает информационные фразы (о работе ателье, адресе шоурума), которые
+    упоминают ателье/шоурум без приглашения.
     """
     t = text.lower()
-    # Не приглашения — общая информация об ателье/адресе
-    if "шьём в нашем ателье" in t:
+    # Не приглашения — общая информация об ателье/адресе/услугах
+    if "шьём в нашем ателье" in t or "шьем в нашем ателье" in t:
         return False
     if "находится у метро" in t or "находится по адрес" in t:
         return False
     # Паттерны явного приглашения
     invite_patterns = [
-        r"прим[её]рк",          # примерку, примерки
+        r"прим[её]рк",                   # примерку, примерки
         r"подъехать",
         r"приезжайт",
         r"приглаш",
-        r"запиш.{0,10}встреч",  # «запишу вас на встречу»
-        r"встреч.{0,10}шоурум", # «встречу в шоурум»
+        r"приход\w*",                    # приходите, приходи
+        r"прийти",
+        r"жд[её]м\s+вас",                # «ждём вас»
+        r"бронир\w*\s+(?:визит|примерк)",# «забронируйте визит/примерку»
+        r"запиш\w*\s+на\s+(?:встреч|примерк|визит)",
+        r"встреч\w*.{0,10}шоурум",
+        r"посмотр\w*\s+вживую",
     ]
     return any(re.search(p, t) for p in invite_patterns)
 
@@ -561,14 +593,21 @@ def solve_q4(zip_path):
             m_id = re.search(r"Чат (C\d+)", lines[0])
             chat_id = m_id.group(1) if m_id else name
 
+            # Склеиваем многострочные сообщения: строки без префикса [DD.MM.YYYY HH:MM]
+            # присоединяются к предыдущему сообщению через пробел.
+            messages = []  # список (ts_str, role, text)
+            msg_header_re = re.compile(r"^\[(.+?)\] (Менеджер|Клиент): (.*)$")
+            for raw in lines[1:]:
+                m = msg_header_re.match(raw)
+                if m:
+                    messages.append([m.group(1), m.group(2), m.group(3)])
+                elif messages and raw.strip():
+                    messages[-1][2] += " " + raw.strip()
+
             first_price_ts = first_price_quote = None
             first_invite_ts = first_invite_quote = None
 
-            for line in lines[1:]:
-                m = re.match(r"\[(.+?)\] (Менеджер|Клиент): (.+)", line)
-                if not m:
-                    continue
-                ts_str, role, text = m.group(1), m.group(2), m.group(3)
+            for ts_str, role, text in messages:
                 try:
                     ts = datetime.strptime(ts_str, "%d.%m.%Y %H:%M")
                 except ValueError:

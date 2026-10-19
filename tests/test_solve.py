@@ -59,6 +59,13 @@ class TestParseDate:
     def test_empty_returns_none(self):
         assert parse_date("") is None
 
+    # Фикс #5: допустимы однозначные день/месяц без ведущих нулей
+    def test_short_dot(self):
+        assert parse_date("9.1.2026") == datetime(2026, 1, 9)
+
+    def test_short_slash(self):
+        assert parse_date("5/3/2025") == datetime(2025, 3, 5)
+
 
 # ---------------------------------------------------------------------------
 # normalize_order_num
@@ -135,6 +142,17 @@ class TestParsePriceCrm:
     def test_plain_int(self):
         assert parse_price_crm("252000") == 252_000.0
 
+    # Фикс #1: американский формат с запятой-разделителем тысяч без десятичной
+    def test_us_thousands_no_decimal(self):
+        assert parse_price_crm("25,000") == 25_000.0
+
+    def test_us_multi_thousands_no_decimal(self):
+        assert parse_price_crm("1,234,567") == 1_234_567.0
+
+    def test_ru_decimal_two_digits(self):
+        # регресс: две цифры после запятой — десятичный разделитель, не тысячи
+        assert parse_price_crm("140000,00") == 140_000.0
+
 
 # ---------------------------------------------------------------------------
 # parse_price_chat / _parse_written_rubles
@@ -187,6 +205,11 @@ class TestCalcDiscountedUnitPrice:
         result = calc_discounted_unit_price(50_000, 1, "24,700.00")
         assert abs(result - (50_000 - 24_700)) < 0.01
 
+    # Фикс #8: защита от деления на ноль
+    def test_zero_qty_no_crash(self):
+        assert calc_discounted_unit_price(100_000, 0, "10%") == 100_000
+        assert calc_discounted_unit_price(100_000, 0, "500") == 100_000
+
 
 # ---------------------------------------------------------------------------
 # extract_order_from_payment
@@ -222,6 +245,17 @@ class TestExtractOrderFromPayment:
     def test_unknown_order_returns_none(self):
         assert extract_order_from_payment("A-01169", self.ORDERS) is None
 
+    # Фикс #4: буква A внутри слова не должна считаться префиксом номера
+    def test_no_match_inside_word(self):
+        # «iPhone A777» — цифры после A, но внутри слова; 777 не в ORDERS всё равно
+        assert extract_order_from_payment("Autoplatezh777", self.ORDERS) is None
+
+    def test_match_at_sentence_start(self):
+        assert extract_order_from_payment("A-00775 оплата", self.ORDERS) == 775
+
+    def test_match_after_space(self):
+        assert extract_order_from_payment("Перевод от Петрова A528", self.ORDERS) == 528
+
 
 # ---------------------------------------------------------------------------
 # is_invite
@@ -242,6 +276,16 @@ class TestIsInvite:
 
     def test_price_message_not_invite(self):
         assert is_invite("Цена изделия 234 000 ₽.") is False
+
+    # Фикс #7: расширенные паттерны приглашения
+    def test_prikhodite(self):
+        assert is_invite("Приходите к нам, посмотрите вживую") is True
+
+    def test_zhdyom_vas(self):
+        assert is_invite("Ждём вас в будни с 10:00 до 19:00") is True
+
+    def test_bronir(self):
+        assert is_invite("Забронируйте примерку на удобное время") is True
 
 
 # ---------------------------------------------------------------------------
