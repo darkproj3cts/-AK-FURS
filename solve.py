@@ -13,6 +13,9 @@ import zipfile
 from collections import defaultdict
 from datetime import datetime, timedelta
 
+# Счётчик предупреждений — инкрементируется по всему коду, выводится в сводке в конце
+_warn = defaultdict(int)
+
 
 # ---------------------------------------------------------------------------
 # Загрузка данных
@@ -146,6 +149,7 @@ def parse_date(s):
         month = _RU_MONTHS.get(mon_str)
         if month:
             return datetime(year, month, day)
+    _warn["даты_не_разобраны"] += 1
     print(f"[parse_date] не удалось разобрать: {s!r}", file=sys.stderr)
     return None
 
@@ -178,6 +182,7 @@ def normalize_manager(s, mgr_map):
     key = s.strip().lower()
     result = mgr_map.get(key)
     if result is None:
+        _warn["менеджеры_не_опознаны"] += 1
         print(f"[Менеджер] неизвестный вариант: {s!r}", file=sys.stderr)
     return result or s.strip()
 
@@ -225,6 +230,7 @@ def parse_price_crm(s):
     try:
         return float(s)
     except ValueError:
+        _warn["цены_crm_не_разобраны"] += 1
         print(f"[parse_price_crm] не удалось разобрать: {s!r}", file=sys.stderr)
         return None
 
@@ -334,6 +340,7 @@ def calc_discounted_unit_price(price_per_unit, qty, discount_str):
     if not discount_str or not discount_str.strip():
         return price_per_unit
     if qty <= 0:
+        _warn["qty_ноль_или_отриц"] += 1
         print(f"[скидка] qty={qty} — пропускаем расчёт скидки", file=sys.stderr)
         return price_per_unit
     d = discount_str.strip()
@@ -345,6 +352,7 @@ def calc_discounted_unit_price(price_per_unit, qty, discount_str):
         # Фиксированная скидка в рублях на строку — используем тот же парсер
         amt = parse_price_crm(d)
         if amt is None:
+            _warn["скидки_не_разобраны"] += 1
             print(f"[скидка] не удалось разобрать: {d!r}", file=sys.stderr)
             return price_per_unit
         return price_per_unit - amt / qty
@@ -493,6 +501,7 @@ def solve_q2(clean_rows, bank_rows):
         try:
             unidentified_sum += float(amt_str)
         except ValueError:
+            _warn["суммы_банк_не_разобраны"] += 1
             print(f"[Q2] не удалось разобрать сумму: {row['Сумма']!r}", file=sys.stderr)
 
     print(
@@ -561,6 +570,7 @@ def solve_q3(clean_rows, prices, renames, mgr_map):
             violations_by_manager[manager] += 1
 
     if skipped_no_price:
+        _warn["Q3_строк_без_прайса"] += len(skipped_no_price)
         unique_skipped = sorted(set(skipped_no_price))
         print(
             f"[Q3] пропущено {len(skipped_no_price)} строк (нет записи в прайсе): {unique_skipped}",
@@ -661,6 +671,41 @@ def solve_q4(zip_path):
 
 
 # ---------------------------------------------------------------------------
+# Сводка предупреждений
+# ---------------------------------------------------------------------------
+
+def print_warn_summary(result):
+    """Выводит в stderr итоговую сводку красных флагов после расчёта всех вопросов."""
+    labels = {
+        "даты_не_разобраны":      "Дат не разобрано         ",
+        "цены_crm_не_разобраны":  "Цен CRM не разобрано     ",
+        "суммы_банк_не_разобраны":"Сумм банка не разобрано  ",
+        "скидки_не_разобраны":    "Скидок не разобрано      ",
+        "менеджеры_не_опознаны":  "Менеджеров не опознано   ",
+        "Q3_строк_без_прайса":    "Строк Q3 без прайса      ",
+        "qty_ноль_или_отриц":     "Строк с qty≤0            ",
+    }
+    total = sum(_warn.values())
+    sep = "─" * 44
+    print(f"\n{'═' * 44}", file=sys.stderr)
+    print("СВОДКА  —  потенциальные проблемы с данными", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    for key, label in labels.items():
+        val = _warn.get(key, 0)
+        flag = " ⚠" if val > 0 else ""
+        print(f"  {label}: {val}{flag}", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    print(f"  Итого строк Q1:  {result['q1_unique_order_lines']} уникальных строк заказов", file=sys.stderr)
+    print(f"  Итого Q4 чатов:  {len(result['q4_chats_meeting_before_price'])} с приглашением до цены", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    if total == 0:
+        print("  ✓  Красных флагов нет — данные обработаны полностью", file=sys.stderr)
+    else:
+        print(f"  ⚠  Красных флагов: {total} — проверьте форматы входных данных!", file=sys.stderr)
+    print(f"{'═' * 44}\n", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # Поле notes — принятые решения
 # ---------------------------------------------------------------------------
 
@@ -713,6 +758,7 @@ def main(data_dir):
     result["run_command"] = "python solve.py data/ > answers.json"
     result["notes"] = build_notes()
 
+    print_warn_summary(result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
