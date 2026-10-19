@@ -1,0 +1,23 @@
+# Data files — do not commit, do not publish
+data/
+01_crm_orders_export.csv
+02_bank_statement_rub.csv
+03_catalog_prices_reference.xlsx
+04_client_chats.zip
+answers_template.json
+ТЗ — тестовое задание AI-ассистент AK Furs.docx
+
+# Debug output
+debug_q4.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
