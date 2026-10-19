@@ -15,6 +15,9 @@ __pycache__/
 venv/
 env/
 
+# Логи и временные файлы
+solve_stderr.txt
+
 # OS
 .DS_Store
 Thumbs.db
