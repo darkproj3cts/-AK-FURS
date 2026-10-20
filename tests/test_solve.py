@@ -424,6 +424,84 @@ class TestIntegration:
 
 
 # ---------------------------------------------------------------------------
+# Интеграция: синтетические данные с известными ответами
+# ---------------------------------------------------------------------------
+
+class TestSyntheticData:
+    """Запускает solve.py на данных, сгенерированных generate_test_data.py.
+    Если test_data/ отсутствует — генерирует автоматически."""
+
+    _result = None
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    @classmethod
+    def _get_result(cls):
+        if cls._result is None:
+            test_data_dir = os.path.join(cls.ROOT, "test_data")
+            if not os.path.isdir(test_data_dir):
+                subprocess.run(
+                    [sys.executable, os.path.join(cls.ROOT, "tests", "generate_test_data.py")],
+                    capture_output=True,
+                )
+            proc = subprocess.run(
+                [sys.executable, os.path.join(cls.ROOT, "solve.py"), test_data_dir],
+                capture_output=True, text=True, encoding="utf-8",
+            )
+            cls._result = json.loads(proc.stdout)
+        return cls._result
+
+    def test_q1_unique_orders(self):
+        assert self._get_result()["q1_unique_orders"] == 8
+
+    def test_q1_unique_lines(self):
+        # 11 сырых строк → 10 после дедупликации A-007 (2 экспорта → 1)
+        assert self._get_result()["q1_unique_order_lines"] == 10
+
+    def test_q2a_paid_without_payment(self):
+        assert sorted(self._get_result()["q2a_paid_orders_without_payment"]) == [3, 9]
+
+    def test_q2b_count(self):
+        assert self._get_result()["q2b_unidentified_payments_count"] == 2
+
+    def test_q2b_sum(self):
+        assert abs(self._get_result()["q2b_unidentified_payments_sum_rub"] - 37_000.0) < 1.0
+
+    def test_q3_total(self):
+        assert self._get_result()["q3_price_violation_lines_total"] == 5
+
+    def test_q3_sergeyeva_count(self):
+        by_mgr = self._get_result()["q3_price_violation_lines_by_manager"]
+        assert by_mgr.get("Алина Сергеева") == 3
+
+    def test_q3_belova_count(self):
+        by_mgr = self._get_result()["q3_price_violation_lines_by_manager"]
+        assert by_mgr.get("Вероника Белова") == 1
+
+    def test_q3_ershova_count(self):
+        by_mgr = self._get_result()["q3_price_violation_lines_by_manager"]
+        assert by_mgr.get("Ольга Ершова") == 1
+
+    def test_q3_order_deterministic(self):
+        # Сергеева (3) идёт первой — сортировка по убыванию
+        keys = list(self._get_result()["q3_price_violation_lines_by_manager"].keys())
+        assert keys[0] == "Алина Сергеева"
+
+    def test_q4_chats(self):
+        assert self._get_result()["q4_chats_meeting_before_price"] == ["C0001", "C0003", "C0005"]
+
+    def test_no_red_flags_in_stderr(self):
+        """На синтетических данных не должно быть красных флагов."""
+        test_data_dir = os.path.join(self.ROOT, "test_data")
+        if not os.path.isdir(test_data_dir):
+            return
+        proc = subprocess.run(
+            [sys.executable, os.path.join(self.ROOT, "solve.py"), test_data_dir],
+            capture_output=True, text=True, encoding="utf-8",
+        )
+        assert "Красных флагов нет" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
 # _safe_date — прямые тесты
 # ---------------------------------------------------------------------------
 

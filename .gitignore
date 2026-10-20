@@ -17,6 +17,11 @@ env/
 
 # Логи и временные файлы
 solve_stderr.txt
+test_stderr.txt
+test_answers.json
+
+# Синтетические тестовые данные (генерируются скриптом)
+test_data/
 
 # OS
 .DS_Store
