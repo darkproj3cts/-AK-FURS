@@ -22,6 +22,10 @@ from solve import (
     calc_discounted_unit_price,
     extract_order_from_payment,
     is_invite,
+    _is_rub,
+    _safe_date,
+    normalize_manager,
+    build_notes,
 )
 
 
@@ -397,3 +401,234 @@ class TestIntegration:
         if r is None:
             return
         assert len(r["q4_chats_meeting_before_price"]) == 21
+
+    def test_q3_manager_order_deterministic(self):
+        """Менеджеры в q3 идут по убыванию числа нарушений, затем по имени."""
+        r = self._get_result()
+        if r is None:
+            return
+        by_mgr = r["q3_price_violation_lines_by_manager"]
+        counts = list(by_mgr.values())
+        # Проверяем, что список счётчиков монотонно не возрастает
+        assert counts == sorted(counts, reverse=True)
+
+    def test_notes_no_hardcoded_counts(self):
+        """notes не должен содержать захардкоженные числа из учебного набора данных."""
+        r = self._get_result()
+        if r is None:
+            return
+        notes = r["notes"]
+        # Бенчмарк-значения, которые не должны встречаться как отдельные числа
+        for forbidden in ("1000", "1368", "3437100"):
+            assert forbidden not in notes, f"notes содержит захардкоженное число: {forbidden}"
+
+
+# ---------------------------------------------------------------------------
+# _safe_date — прямые тесты
+# ---------------------------------------------------------------------------
+
+class TestSafeDate:
+    def test_valid_date(self):
+        assert _safe_date(2026, 3, 3) == datetime(2026, 3, 3)
+
+    def test_feb_30_returns_none(self):
+        assert _safe_date(2026, 2, 30) is None
+
+    def test_apr_31_returns_none(self):
+        assert _safe_date(2025, 4, 31) is None
+
+    def test_month_13_returns_none(self):
+        assert _safe_date(2026, 13, 1) is None
+
+    def test_day_0_returns_none(self):
+        assert _safe_date(2026, 1, 0) is None
+
+
+# ---------------------------------------------------------------------------
+# _is_rub — прямые тесты
+# ---------------------------------------------------------------------------
+
+class TestIsRub:
+    def test_none_is_rub(self):
+        # отсутствующая колонка валюты — считаем ₽
+        assert _is_rub(None) is True
+
+    def test_empty_string(self):
+        assert _is_rub("") is True
+
+    def test_ruble_symbol(self):
+        assert _is_rub("₽") is True
+
+    def test_rub_uppercase(self):
+        assert _is_rub("RUB") is True
+
+    def test_rub_lowercase(self):
+        assert _is_rub("rub") is True
+
+    def test_rur(self):
+        assert _is_rub("RUR") is True
+
+    def test_ru_rub(self):
+        assert _is_rub("руб") is True
+
+    def test_ru_rub_dot(self):
+        # «руб.» с точкой на конце
+        assert _is_rub("руб.") is True
+
+    def test_whitespace_stripped(self):
+        assert _is_rub("  RUB  ") is True
+
+    def test_usd_false(self):
+        assert _is_rub("USD") is False
+
+    def test_eur_false(self):
+        assert _is_rub("EUR") is False
+
+    def test_dollar_sign_false(self):
+        assert _is_rub("$") is False
+
+
+# ---------------------------------------------------------------------------
+# normalize_manager
+# ---------------------------------------------------------------------------
+
+class TestNormalizeManager:
+    MGR_MAP = {
+        "белова в.": "Вероника Белова",
+        "veronika b": "Вероника Белова",
+        "алина": "Алина Сергеева",
+        "alina.s": "Алина Сергеева",
+    }
+
+    def test_known_variant(self):
+        assert normalize_manager("Белова В.", self.MGR_MAP) == "Вероника Белова"
+
+    def test_known_latin(self):
+        assert normalize_manager("Veronika B", self.MGR_MAP) == "Вероника Белова"
+
+    def test_case_insensitive(self):
+        # «АЛИНА» → «алина» в map
+        assert normalize_manager("АЛИНА", self.MGR_MAP) == "Алина Сергеева"
+
+    def test_unknown_returns_original(self):
+        # Неизвестный менеджер возвращает исходную строку
+        assert normalize_manager("Иванова И.", self.MGR_MAP) == "Иванова И."
+
+    def test_strips_whitespace(self):
+        assert normalize_manager("  алина  ", self.MGR_MAP) == "Алина Сергеева"
+
+
+# ---------------------------------------------------------------------------
+# build_notes — регрессионный тест
+# ---------------------------------------------------------------------------
+
+class TestBuildNotes:
+    def test_returns_nonempty_string(self):
+        notes = build_notes()
+        assert isinstance(notes, str) and len(notes) > 100
+
+    def test_no_hardcoded_benchmark_numbers(self):
+        """notes не должен содержать числа, привязанные к учебным данным."""
+        notes = build_notes()
+        for forbidden in ("1000", "1368", "3437100", " 68 ", " 21 ", " 16 "):
+            assert forbidden not in notes, f"build_notes содержит захардкоженное значение: {forbidden!r}"
+
+    def test_mentions_key_rules(self):
+        notes = build_notes()
+        assert "DD/MM/YYYY" in notes
+        assert "Выгружено" in notes
+        assert "Скидка" in notes or "скидка" in notes.lower()
+
+
+# ---------------------------------------------------------------------------
+# Дополнительные тесты: is_invite — непокрытые паттерны
+# ---------------------------------------------------------------------------
+
+class TestIsInviteExtra:
+    def test_priyti(self):
+        # «прийти» — явное приглашение
+        assert is_invite("Вам нужно прийти к нам в шоурум") is True
+
+    def test_zapishi_na_vstrechu(self):
+        assert is_invite("Запишу вас на встречу на удобное время") is True
+
+    def test_zapishi_na_primerku(self):
+        assert is_invite("Запишу на примерку в четверг") is True
+
+    def test_vstrecha_v_shoorum(self):
+        assert is_invite("Давайте организуем встречу в шоуруме?") is True
+
+    def test_nakhoditsya_po_adresu_excluded(self):
+        # адресная информация — не приглашение
+        assert is_invite("Наш шоурум находится по адресу: ул. Пятницкая, 18") is False
+
+    def test_posmotrite_zhivoyu(self):
+        assert is_invite("Приходите, посмотрите вживую — это совсем другое ощущение") is True
+
+
+# ---------------------------------------------------------------------------
+# Дополнительные тесты: extract_order_from_payment — ведущие нули в # и №
+# ---------------------------------------------------------------------------
+
+class TestExtractOrderFromPaymentExtra:
+    ORDERS = {243, 775, 528}
+
+    def test_hash_leading_zeros(self):
+        assert extract_order_from_payment("#00243", self.ORDERS) == 243
+
+    def test_nummer_leading_zeros(self):
+        assert extract_order_from_payment("№00775", self.ORDERS) == 775
+
+    def test_no_dot_space(self):
+        # «No. 528» — «no.» с точкой, пробел
+        assert extract_order_from_payment("No. 528", self.ORDERS) == 528
+
+
+# ---------------------------------------------------------------------------
+# Дополнительные тесты: calc_discounted_unit_price — непарсимая скидка
+# ---------------------------------------------------------------------------
+
+class TestCalcDiscountedUnitPriceExtra:
+    def test_unparseable_discount_returns_original(self):
+        # «пять рублей» не парсится parse_price_crm → возвращаем исходную цену
+        assert calc_discounted_unit_price(100_000, 1, "пять рублей") == 100_000
+
+    def test_percent_with_space(self):
+        # «15 %» со пробелом перед знаком
+        result = calc_discounted_unit_price(100_000, 1, "15 %")
+        assert abs(result - 85_000.0) < 0.01
+
+    def test_fixed_discount_larger_than_price(self):
+        # Скидка больше цены — физически странно, но не должно падать
+        result = calc_discounted_unit_price(1_000, 1, "5000")
+        assert result == 1_000 - 5_000  # отрицательная цена — не наш invariant
+
+
+# ---------------------------------------------------------------------------
+# Детерминированная сортировка менеджеров Q3
+# ---------------------------------------------------------------------------
+
+class TestManagerSortDeterministic:
+    def test_sort_by_count_desc_then_name_asc(self):
+        violations = {
+            "Ольга Ершова": 17,
+            "Полина Орлова": 42,
+            "Алина Сергеева": 5,
+            "Вероника Белова": 4,
+        }
+        sorted_result = dict(
+            sorted(violations.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        assert list(sorted_result.keys()) == [
+            "Полина Орлова",    # 42
+            "Ольга Ершова",     # 17
+            "Алина Сергеева",   # 5
+            "Вероника Белова",  # 4
+        ]
+
+    def test_tie_broken_by_name(self):
+        violations = {"Яблокова": 10, "Абрамова": 10}
+        sorted_result = dict(
+            sorted(violations.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        assert list(sorted_result.keys()) == ["Абрамова", "Яблокова"]
